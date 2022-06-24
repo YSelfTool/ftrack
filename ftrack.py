@@ -27,6 +27,18 @@ def watch_file(filename, mp_value):
         if mp_value.value < -10:
             break
 
+def point_to_arr(point):
+    return np.array([point.x, point.y])
+
+
+def draw_point(x, y, image, color, size):
+    height, width, _ = image.shape
+    min_x = np.maximum(x - size, 0)
+    max_x = np.minimum(x + size, width)
+    min_y = np.maximum(y - size, 0)
+    max_y = np.minimum(y + size, height)
+    image[min_y:max_y,min_x:max_x] = color
+
 
 def main():
     import argparse
@@ -37,6 +49,8 @@ def main():
     parser.add_argument("--output-size", type=int, nargs=2, default=(1280, 720), help="Resolution of output video")
     parser.add_argument("--fps", type=int, default=30, help="Frames per second for input and output.")
     parser.add_argument("--smoothness", type=float, default=0.95, help="Tracking smoothing factor.")
+    parser.add_argument("--zoom-smoothness", type=float, default=0.95, help="Tracking smoothing factor.")
+    parser.add_argument("--zoom-target", type=float, default=1.0, help="Target value for how far to zoom in.")
     parser.add_argument("--blur-background", action="store_true", help="Blur background")
     parser.add_argument("--pose", action="store_true", help="Pose detection")
 
@@ -45,6 +59,9 @@ def main():
 
     input_width, input_height = args.input_size
     output_width, output_height = args.output_size
+
+    min_zoom_factor = 1
+    max_zoom_factor = min(input_width / output_width, input_height / output_height)
 
     capture = cv2.VideoCapture(args.input)
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, input_width)
@@ -81,6 +98,7 @@ def main():
                 capture.set(cv2.CAP_PROP_FPS, args.fps)
 
                 center_x, center_y = input_width / 2, input_height / 2
+                zoom_factor = (min_zoom_factor + max_zoom_factor) / 2
 
                 while capture.isOpened() and readers.value > 0:
                     success, image = capture.read()
@@ -98,11 +116,26 @@ def main():
                         result = detection_results.detections[0]
                         image.flags.writeable = True
                         result = detection_results.detections[0]
-                        nose_tip = mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.NOSE_TIP)
-                        new_center_x = nose_tip.x * input_width
-                        new_center_y = nose_tip.y * input_height
+                        img_size = np.array([input_width, input_height])
+                        nose_tip = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.NOSE_TIP)) * img_size
+                        left_eye = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.LEFT_EYE)) * img_size
+                        right_eye = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.RIGHT_EYE)) * img_size
+                        mouth_center = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.MOUTH_CENTER)) * img_size
+                        left_ear = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.LEFT_EAR_TRAGION)) * img_size
+                        right_ear = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.RIGHT_EAR_TRAGION)) * img_size
+                        ear_center = (left_ear + right_ear) / 2
+                        head_center = (ear_center + nose_tip) / 2
+                        new_center_x = head_center[0]
+                        new_center_y = head_center[1]
+
+                        bbox = result.location_data.relative_bounding_box
+                        bbox_width = bbox.width
+                        bbox_height = bbox.height
+                        new_zoom_factor = args.zoom_target * max(bbox_width * input_width, bbox_height * input_height) / min(output_width, output_height)
+
                         center_x = args.smoothness * center_x + (1 - args.smoothness) * new_center_x
                         center_y = args.smoothness * center_y + (1 - args.smoothness) * new_center_y
+                        zoom_factor = max(min(args.zoom_smoothness * zoom_factor + (1 - args.zoom_smoothness) * new_zoom_factor, max_zoom_factor), min_zoom_factor)
 
                     if args.pose:
                         image.flags.writeable = False
@@ -119,9 +152,11 @@ def main():
                         image = (image * fgmask + inverted * (1 - fgmask)).astype(np.uint8)
 
 
-                    offset_x = min(max(int(center_x - output_width / 2), 0), input_width - output_width)
-                    offset_y = min(max(int(center_y - output_height / 2), 0), input_height - output_height)
-                    image = image[offset_y:offset_y + output_height, offset_x:offset_x + output_width]
+                    offset_x = min(max(int(center_x - output_width * zoom_factor / 2), 0), input_width - int(output_width * zoom_factor))
+                    offset_y = min(max(int(center_y - output_height * zoom_factor / 2), 0), input_height - int(output_height * zoom_factor))
+                    image = image[offset_y:int(offset_y + output_height * zoom_factor), offset_x:int(offset_x + output_width * zoom_factor)]
+                    # zoom
+                    image = cv2.resize(image, (output_width, output_height))
 
                     camera.send(image)
                     camera.sleep_until_next_frame()

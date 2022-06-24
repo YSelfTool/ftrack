@@ -86,12 +86,14 @@ def main():
 
         success, frame1 = capture.read()
         if not success:
-            print(f"Failed to read frame from source: {input_input}")
+            print(f"Failed to read frame from source: {input_device}")
             return
         capture.release()
+        print("Test successful")
 
 
     with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detection, mp_background.SelfieSegmentation() as change_bg, mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
+        print("Detection set up.")
         with pyvirtualcam.Camera(width=output_width, height=output_height, fps=args.fps, device=args.output) as camera:
             print(f"Using virtual camera: {camera.device}")
 
@@ -124,6 +126,7 @@ def main():
                 while all(capture.isOpened() for capture in captures) and readers.value > 0:
                     found = False
                     old_capture = current_capture
+                    old_image = None
                     if current_capture is not None:
                         image, detection_results = capture_image(current_capture, face_detection)
                         old_image = image
@@ -143,7 +146,7 @@ def main():
                                     center_x = None
                                     frames_on_current = 0
                                     break
-                    if not found:
+                    if not found and old_image is not None:
                         image = old_image
                     if found:
                         image.flags.writeable = False
@@ -175,21 +178,13 @@ def main():
                             center_x = new_center_x
                             center_y = new_center_y
                             zoom_factor = new_zoom_factor
-
-                    if args.pose:
-                        image.flags.writeable = False
-                        pose_results = pose.process(image)
-                        image.flags.writeable = True
-                        mp_drawing.draw_landmarks(image, pose_results.pose_landmarks, mp_pose.POSE_CONNECTIONS, landmark_drawing_spec=mediapipe.solutions.drawing_styles.get_default_pose_landmarks_style())
-
-                    if args.blur_background:
-                        image.flags.writeable = False
-                        result = change_bg.process(image)
-                        image.flags.writeable = True
-                        fgmask = np.expand_dims(result.segmentation_mask, 2)
-                        inverted = cv2.GaussianBlur(image, (25, 25), 0)
-                        image = (image * fgmask + inverted * (1 - fgmask)).astype(np.uint8)
-
+                    else:
+                        new_center_x = input_width / 2
+                        new_center_y = input_height / 2
+                        new_zoom_factor = max_zoom_factor
+                        center_x = 0.995 * center_x + (1 - 0.995) * new_center_x
+                        center_y = 0.995 * center_y + (1 - 0.995) * new_center_y
+                        zoom_factor = max(min(0.995 * zoom_factor + (1 - 0.995) * new_zoom_factor, max_zoom_factor), min_zoom_factor)
 
                     offset_x = min(max(int(center_x - output_width * zoom_factor / 2), 0), input_width - int(output_width * zoom_factor))
                     offset_y = min(max(int(center_y - output_height * zoom_factor / 2), 0), input_height - int(output_height * zoom_factor))

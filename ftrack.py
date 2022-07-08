@@ -44,10 +44,9 @@ class InputDevice:
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, max_input_height)
         capture.set(cv2.CAP_PROP_FPS, fps)
         success, frame = capture.read()
+        capture.release()
         if success:
             input_size = (frame.shape[1], frame.shape[0])
-        capture.release()
-        if input_size is not None:
             print(f"Using input size {input_size} for {device_name}")
             return InputDevice(device_name, capture, input_size, fps)
         raise ValueError(f"Cannot find resolution for input device {device_name}.")

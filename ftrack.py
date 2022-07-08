@@ -16,6 +16,66 @@ mp_background = mediapipe.solutions.selfie_segmentation
 mp_pose = mediapipe.solutions.pose
 
 
+class InputDevice:
+    def __init__(self, device_name, capture, input_size, fps):
+        self.device_name = device_name
+        self.capture = capture
+        self.input_size = input_size
+        self.fps = fps
+
+    def setup(self):
+        input_width, input_height = self.input_size
+        self.capture = cv2.VideoCapture(self.device_name)
+        self.capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+        self.capture.set(cv2.CAP_PROP_FRAME_WIDTH, input_width)
+        self.capture.set(cv2.CAP_PROP_FRAME_HEIGHT, input_height)
+        self.capture.set(cv2.CAP_PROP_FPS, self.fps)
+
+    def release(self):
+        self.capture.release()
+
+
+    @staticmethod
+    def create(device_name, max_resolution, fps=30):
+        capture = cv2.VideoCapture(device_name)
+        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+        max_input_width, max_input_height = max_resolution
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, max_input_width)
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, max_input_height)
+        capture.set(cv2.CAP_PROP_FPS, fps)
+        success, frame = capture.read()
+        if success:
+            input_size = (frame.shape[1], frame.shape[0])
+        capture.release()
+        if input_size is not None:
+            print(f"Using input size {input_size} for {device_name}")
+            return InputDevice(device_name, capture, input_size, fps)
+        raise ValueError(f"Cannot find resolution for input device {device_name}.")
+
+    def get_max_zoom_factor(self, output_width, output_height):
+        input_width, input_height = self.input_size
+        return min(input_width / output_width, input_height / output_height)
+
+    def capture_image(self, face_detection):
+        success, image = self.capture.read()
+        if not success:
+            raise ValueError(f"Cannot read image from device {capture}")
+
+        image.flags.writeable = False
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        detection_results = face_detection.process(image)
+        image.flags.writeable = True
+        return image, detection_results
+
+    def __repr__(self):
+        return f"InputDevice(device_name={self.device_name!r}, capture={self.capture!r}, input_size={self.input_size!r}, fps={self.fps!r})"
+
+    def __str__(self):
+        return self.device_name
+
+
+
 def watch_file(filename, mp_value):
     inotify = Inotify()
     inotify.add_watch(filename)
@@ -40,59 +100,30 @@ def draw_point(x, y, image, color, size):
     image[min_y:max_y,min_x:max_x] = color
 
 
-def capture_image(capture, face_detection):
-    success, image = capture.read()
-    if not success:
-        raise ValueError(f"Cannot read image from device {capture}")
-
-    image.flags.writeable = False
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-    detection_results = face_detection.process(image)
-    image.flags.writeable = True
-    return image, detection_results
-
 
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--inputs", "-i", nargs="+", default=["/dev/video0"], help="Input device paths")
     parser.add_argument("--output", "-o", default="/dev/video2", help="Output device path")
-    parser.add_argument("--input-size", type=int, nargs=2, default=(1920, 1080), help="Resolution of input video")
     parser.add_argument("--output-size", type=int, nargs=2, default=(1280, 720), help="Resolution of output video")
     parser.add_argument("--fps", type=int, default=30, help="Frames per second for input and output.")
+    parser.add_argument("--max-resolution", type=int, nargs=2, default=(2560, 1440), help="Maximum resolution to capture video at.")
     parser.add_argument("--smoothness", type=float, default=0.95, help="Tracking smoothing factor.")
     parser.add_argument("--zoom-smoothness", type=float, default=0.975, help="Tracking smoothing factor.")
     parser.add_argument("--zoom-target", type=float, default=2.0, help="Target value for how far to zoom in.")
-    parser.add_argument("--blur-background", action="store_true", help="Blur background")
-    parser.add_argument("--pose", action="store_true", help="Pose detection")
 
 
     args = parser.parse_args()
 
-    input_width, input_height = args.input_size
+    input_devices = [InputDevice.create(input_device_name, args.max_resolution, args.fps) for input_device_name in args.inputs]
+
     output_width, output_height = args.output_size
 
     min_zoom_factor = 1
-    max_zoom_factor = min(input_width / output_width, input_height / output_height)
+    max_zoom_factor = min(input_device.get_max_zoom_factor(output_width, output_height) for input_device in input_devices)
 
-    for input_device in args.inputs:
-        print(f"Testing input device {input_device}")
-        capture = cv2.VideoCapture(input_device)
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, input_width)
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, input_height)
-        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-        capture.set(cv2.CAP_PROP_FPS, args.fps)
-
-        success, frame1 = capture.read()
-        if not success:
-            print(f"Failed to read frame from source: {input_device}")
-            return
-        capture.release()
-        print("Test successful")
-
-
-    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detection, mp_background.SelfieSegmentation() as change_bg, mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5) as pose:
+    with mp_face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5) as face_detection:
         print("Detection set up.")
         with pyvirtualcam.Camera(width=output_width, height=output_height, fps=args.fps, device=args.output) as camera:
             print(f"Using virtual camera: {camera.device}")
@@ -108,52 +139,47 @@ def main():
                 while readers.value == 0:
                     time.sleep(1)
 
-                captures = []
-                for input_device in args.inputs:
-                    capture = cv2.VideoCapture(input_device)
-                    capture.set(cv2.CAP_PROP_FRAME_WIDTH, input_width)
-                    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, input_height)
-                    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
-                    capture.set(cv2.CAP_PROP_FPS, args.fps)
-                    captures.append(capture)
+                center_x, center_y = None, None
+                zoom_factor = min_zoom_factor
 
-                center_x, center_y = input_width / 2, input_height / 2
-                zoom_factor = (min_zoom_factor + max_zoom_factor) / 2
-
-                current_capture = None
+                for input_device in input_devices:
+                    input_device.setup()
+                current_input_device = None
                 frames_on_current = 0
 
-                while all(capture.isOpened() for capture in captures) and readers.value > 0:
+                while all(input_device.capture.isOpened() for input_device in input_devices) and readers.value > 0:
                     found = False
-                    old_capture = current_capture
-                    old_image = None
-                    if current_capture is not None:
-                        image, detection_results = capture_image(current_capture, face_detection)
-                        old_image = image
+                    previous_input_device = current_input_device
+                    image_from_current_input_device = None
+                    if current_input_device is not None:
+                        image, detection_results = current_input_device.capture_image(face_detection)
+                        image_from_current_input_device = image
                         frames_on_current += 1
                         if detection_results.detections:
                             found = True
-                    if (not found and frames_on_current >= args.fps) or current_capture is None:
-                        for capture in captures:
-                            if capture != current_capture:
-                                image, detection_results = capture_image(capture, face_detection)
+                    if (not found and frames_on_current >= args.fps) or current_input_device is None:
+                        for input_device in input_devices:
+                            if input_device != current_input_device:
+                                image, detection_results = input_device.capture_image(face_detection)
                                 if detection_results.detections and any(d.score[0] > 0.9 for d in detection_results.detections):
-                                    print(f"Switching to {capture}")
+                                    print(f"Switching to {input_device}")
                                     found = True
-                                    current_capture = capture
-                                    capture.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                                    capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+                                    current_input_device = input_device
+                                    input_device.capture.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                                    input_device.capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
                                     center_x = None
                                     frames_on_current = 0
+                                    max_zoom_factor = input_device.get_max_zoom_factor(output_width, output_height)
                                     break
-                    if not found and old_image is not None:
-                        image = old_image
+                    if not found and image_from_current_input_device is not None:
+                        image = image_from_current_input_device
+                    input_height, input_width = image.shape[:2]
                     if found:
                         image.flags.writeable = False
                         result = detection_results.detections[0]
                         image.flags.writeable = True
                         result = detection_results.detections[0]
-                        img_size = np.array([input_width, input_height])
+                        img_size = np.array([image.shape[1], image.shape[0]])
                         nose_tip = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.NOSE_TIP)) * img_size
                         left_eye = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.LEFT_EYE)) * img_size
                         right_eye = point_to_arr(mp_face_detection.get_key_point(result, mp_face_detection.FaceKeyPoint.RIGHT_EYE)) * img_size
@@ -182,9 +208,14 @@ def main():
                         new_center_x = input_width / 2
                         new_center_y = input_height / 2
                         new_zoom_factor = max_zoom_factor
-                        center_x = 0.995 * center_x + (1 - 0.995) * new_center_x
-                        center_y = 0.995 * center_y + (1 - 0.995) * new_center_y
-                        zoom_factor = max(min(0.995 * zoom_factor + (1 - 0.995) * new_zoom_factor, max_zoom_factor), min_zoom_factor)
+                        if center_x is not None:
+                            center_x = 0.995 * center_x + (1 - 0.995) * new_center_x
+                            center_y = 0.995 * center_y + (1 - 0.995) * new_center_y
+                            zoom_factor = max(min(0.995 * zoom_factor + (1 - 0.995) * new_zoom_factor, max_zoom_factor), min_zoom_factor)
+                        else:
+                            center_x = new_center_x
+                            center_y = new_center_y
+                            zoom_factor = new_zoom_factor
 
                     offset_x = min(max(int(center_x - output_width * zoom_factor / 2), 0), input_width - int(output_width * zoom_factor))
                     offset_y = min(max(int(center_y - output_height * zoom_factor / 2), 0), input_height - int(output_height * zoom_factor))
@@ -195,8 +226,8 @@ def main():
                     camera.send(image)
                     camera.sleep_until_next_frame()
 
-                for capture in captures:
-                    capture.release()
+                for input_device in input_devices:
+                    input_device.release()
                 camera.send(np.zeros((output_height, output_width, 3), dtype=np.uint8))
 
             mp_value.value = -100

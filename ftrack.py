@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+import os
 import time
 from multiprocessing import Process, Value
+import subprocess as sp
 
 import numpy as np
 import cv2
@@ -76,12 +78,16 @@ class InputDevice:
 
 
 def watch_file(filename, mp_value):
+    pgid = os.getpgid(os.getpid())
+    lsof_output = sp.run(["lsof", "-F", "-g", f"^{pgid}", filename], text=True, stdout=sp.PIPE).stdout.splitlines()
+    initial_watchers = len([line for line in lsof_output if line.startswith("p")])
+    mp_value.value = initial_watchers
     inotify = Inotify()
     inotify.add_watch(filename)
     for event, flags, filename, _ in inotify.event_gen(yield_nones=False):
         if "IN_OPEN" in flags:
             mp_value.value += 1
-        if "IN_CLOSE_WRITE" in flags:
+        if "IN_CLOSE_WRITE" in flags or "IN_CLOSE_NOWRITE" in flags:
             mp_value.value -= 1
         if mp_value.value < -10:
             break
@@ -137,6 +143,8 @@ def main():
             while True:
                 while readers.value == 0:
                     time.sleep(1)
+
+                print("Detected readers, starting output.")
 
                 center_x, center_y = None, None
                 zoom_factor = min_zoom_factor
@@ -228,6 +236,8 @@ def main():
                 for input_device in input_devices:
                     input_device.release()
                 camera.send(np.zeros((output_height, output_width, 3), dtype=np.uint8))
+
+                print("No more readers, pausing output.")
 
             mp_value.value = -100
             inotify_process.join()

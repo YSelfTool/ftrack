@@ -117,6 +117,7 @@ def main():
     parser.add_argument("--smoothness", type=float, default=0.95, help="Tracking smoothing factor.")
     parser.add_argument("--zoom-smoothness", type=float, default=0.975, help="Tracking smoothing factor.")
     parser.add_argument("--zoom-target", type=float, default=2.0, help="Target value for how far to zoom in.")
+    parser.add_argument("--digital-zoom", action="store_false", dest="limit_zoom", help="Do not limit zoom to input video resolution.")
 
 
     args = parser.parse_args()
@@ -206,7 +207,9 @@ def main():
                         if center_x is not None:
                             center_x = args.smoothness * center_x + (1 - args.smoothness) * new_center_x
                             center_y = args.smoothness * center_y + (1 - args.smoothness) * new_center_y
-                            zoom_factor = max(min(args.zoom_smoothness * zoom_factor + (1 - args.zoom_smoothness) * new_zoom_factor, max_zoom_factor), min_zoom_factor)
+                            zoom_factor = min(args.zoom_smoothness * zoom_factor + (1 - args.zoom_smoothness) * new_zoom_factor, max_zoom_factor)
+                            if args.limit_zoom:
+                                zoom_factor = max(min(zoom_factor, max_zoom_factor), min_zoom_factor)
                         else:
                             center_x = new_center_x
                             center_y = new_center_y
@@ -218,7 +221,9 @@ def main():
                         if center_x is not None:
                             center_x = 0.995 * center_x + (1 - 0.995) * new_center_x
                             center_y = 0.995 * center_y + (1 - 0.995) * new_center_y
-                            zoom_factor = max(min(0.995 * zoom_factor + (1 - 0.995) * new_zoom_factor, max_zoom_factor), min_zoom_factor)
+                            zoom_factor = min(0.995 * zoom_factor + (1 - 0.995) * new_zoom_factor, max_zoom_factor)
+                            if args.limit_zoom:
+                                zoom_factor = max(min(zoom_factor, max_zoom_factor), min_zoom_factor)
                         else:
                             center_x = new_center_x
                             center_y = new_center_y

@@ -60,7 +60,7 @@ class InputDevice:
     def capture_image(self, face_detection):
         success, image = self.capture.read()
         if not success:
-            raise ValueError(f"Cannot read image from device {capture}")
+            raise ValueError(f"Cannot read image from device {self.capture}")
 
         image.flags.writeable = False
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)

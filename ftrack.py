@@ -21,56 +21,6 @@ mp_background = mediapipe.solutions.selfie_segmentation
 mp_pose = mediapipe.solutions.pose
 from mediapipe.python.solutions import drawing_styles
 
-def collect_landmark_indices(connections):
-    indices = set()
-    for first, second in connections:
-        indices.add(first)
-        indices.add(second)
-    return sorted(indices)
-
-LANDMARKS_LEFT_IRIS = collect_landmark_indices(mp_face_mesh_connections.FACEMESH_LEFT_IRIS)
-LANDMARKS_RIGHT_IRIS = collect_landmark_indices(mp_face_mesh_connections.FACEMESH_RIGHT_IRIS)
-LANDMARKS_FACE_OUTLINE = collect_landmark_indices(mp_face_mesh_connections.FACEMESH_FACE_OVAL)
-
-def extract_landmarks_position_and_size(landmarks, indices, input_size):
-    input_width, input_height = input_size
-    x = []
-    y = []
-    z = []
-    for index in indices:
-        landmark = landmarks.landmark[index]
-        x.append(landmark.x * input_width)
-        y.append(landmark.y * input_height)
-        z.append(landmark.z)
-    min_x = np.min(x)
-    max_x = np.max(x)
-    center_x = np.mean(x)
-    min_y = np.min(y)
-    max_y = np.max(y)
-    center_y = np.mean(y)
-    min_z = np.min(z)
-    max_z = np.max(z)
-    center_z = np.mean(z)
-    return (center_x, center_y, center_z), (max_x - min_x, max_y - min_y, max_z - min_z)
-
-def extract_head_position(landmarks, input_size):
-    left_iris_pos, left_iris_size = extract_landmarks_position_and_size(landmarks, LANDMARKS_LEFT_IRIS, input_size)
-    right_iris_pos, right_iris_size = extract_landmarks_position_and_size(landmarks, LANDMARKS_RIGHT_IRIS, input_size)
-    face_pos, face_size = extract_landmarks_position_and_size(landmarks, LANDMARKS_FACE_OUTLINE, input_size)
-    iris_delta = abs(right_iris_pos[2] - left_iris_pos[2])
-    input_width, input_height = input_size
-    left_iris_ratio = left_iris_size[0] / left_iris_size[1]
-    if left_iris_ratio > 1:
-        left_iris_ratio = 1 / left_iris_ratio
-    right_iris_ratio = right_iris_size[0] / right_iris_size[1]
-    if right_iris_ratio > 1:
-        right_iris_ratio = 1 / right_iris_ratio
-    if left_iris_pos[2] < right_iris_pos[2]:
-        iris_ratio = left_iris_ratio
-    else:
-        iris_ratio = right_iris_ratio
-    return face_pos, face_size, iris_delta, iris_ratio
-
 
 class DetectionRectangle:
     def __init__(self, input_size, output_size, smoothness_pos, smoothness_size, target_size_factor=1, digital_zoom=False):
@@ -93,7 +43,7 @@ class DetectionRectangle:
         width, height, *_ = size
         width = width * self.target_size_factor
         height = height * self.target_size_factor
-        zoom_factor = min(width / self.output_width, height / self.output_height)
+        zoom_factor = max(width / self.output_width, height / self.output_height)
         self.zoom_factor.update(zoom_factor)
 
 
@@ -116,14 +66,63 @@ class DetectionRectangle:
         return f"<DetectionRect({self.center_x.value}, {self.center_y.value}, {self.zoom_factor.value})>"
 
 
+class Detector:
+    def __init__(self, input_device, detection, target_landmarks, detection_rect):
+        self.input_device = input_device
+        self.detection = detection
+        self.target_landmarks = target_landmarks
+        self.detection_rect = detection_rect
+
+    @staticmethod
+    def create(input_device, track_landmarks, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom):
+        detection_rect = DetectionRectangle(input_device.input_size, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom)
+        detection = mp_pose.Pose(static_image_mode=False, model_complexity=1, enable_segmentation=False, min_detection_confidence=0.5)
+        target_landmarks = [mp_pose.PoseLandmark[landmark.upper()] for landmark in track_landmarks]
+        return Detector(input_device, detection, target_landmarks, detection_rect)
+
+    @contextlib.contextmanager
+    def use(self):
+        with self.input_device.use(), self.detection:
+            yield
+
+    def capture_image(self):
+        image = self.input_device.capture_image()
+        detection_results = self.detection.process(image)
+        self.good_detection = False
+        if detection_results is not None and detection_results.pose_landmarks is not None:
+            xs = []
+            ys = []
+            for index in self.target_landmarks:
+                landmark = detection_results.pose_landmarks.landmark[index]
+                if landmark.visibility > 0.5:
+                    xs.append(landmark.x * self.input_device.input_size[0])
+                    ys.append(landmark.y * self.input_device.input_size[1])
+
+            if len(xs) > 1:
+                xs = np.array(xs)
+                ys = np.array(ys)
+                center_x = np.mean(xs)
+                center_y = np.mean(ys)
+                width = np.max(np.abs(xs - center_x))
+                height = np.max(np.abs(ys - center_y))
+                self.detection_rect.update((center_x, center_y), (width, height))
+                self.good_detection = True
+
+        self.image = self.detection_rect.crop_image(image)
+
+    def is_open(self):
+        return self.input_device.is_open()
+
+    def __str__(self):
+        return str(self.input_device)
+    
+
 class InputDevice:
-    def __init__(self, device_name, capture, input_size, output_size, fps, face_detection, smoothness_pos, smoothness_size, target_size_factor, digital_zoom):
+    def __init__(self, device_name, capture, input_size, fps):
         self.device_name = device_name
         self.capture = capture
         self.input_size = input_size
         self.fps = fps
-        self.face_detection = face_detection
-        self.detection_rect = DetectionRectangle(input_size, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom)
 
     def setup(self):
         input_width, input_height = self.input_size
@@ -136,9 +135,8 @@ class InputDevice:
     def release(self):
         self.capture.release()
 
-
     @staticmethod
-    def create(device_name, max_resolution, output_size, fps, smoothness_pos, smoothness_size, target_size_factor, digital_zoom):
+    def create(device_name, max_resolution, fps):
         capture = cv2.VideoCapture(device_name)
         capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         max_input_width, max_input_height = max_resolution
@@ -150,15 +148,13 @@ class InputDevice:
         if success:
             input_size = (frame.shape[1], frame.shape[0])
             print(f"Using input size {input_size} for {device_name}")
-            face_detection = mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5, min_tracking_confidence=0.5)
-            return InputDevice(device_name, capture, input_size, output_size, fps, face_detection, smoothness_pos, smoothness_size, target_size_factor, digital_zoom)
+            return InputDevice(device_name, capture, input_size, fps)
         raise ValueError(f"Cannot find resolution for input device {device_name}.")
 
     @contextlib.contextmanager
     def use(self):
         self.setup()
-        with self.face_detection:
-            yield
+        yield
         self.release()
 
     def get_max_zoom_factor(self, output_width, output_height):
@@ -172,31 +168,17 @@ class InputDevice:
 
         image.flags.writeable = False
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-        detection_results = self.face_detection.process(image)
         image.flags.writeable = True
-        good_detection = False
-        if detection_results.multi_face_landmarks is not None:
-            good_detection = True
-            face_landmarks = detection_results.multi_face_landmarks[0]
-            face_pos, face_size, iris_delta, iris_size_ratio = extract_head_position(face_landmarks, self.input_size)
-            self.detection_rect.update(face_pos, face_size)
-            self.iris_delta = iris_delta
-            self.iris_size_ratio = iris_size_ratio
-            mp_drawing.draw_landmarks(image, face_landmarks, mp_face_mesh.FACEMESH_IRISES, landmark_drawing_spec=None, connection_drawing_spec=drawing_styles.get_default_face_mesh_iris_connections_style())
-            mp_drawing.draw_landmarks(image, face_landmarks, mp_face_mesh_connections.FACEMESH_LEFT_EYE, landmark_drawing_spec=None, connection_drawing_spec=drawing_styles._FACEMESH_CONTOURS_CONNECTION_STYLE[mp_face_mesh_connections.FACEMESH_LEFT_EYE])
-            mp_drawing.draw_landmarks(image, face_landmarks, mp_face_mesh_connections.FACEMESH_RIGHT_EYE, landmark_drawing_spec=None, connection_drawing_spec=drawing_styles._FACEMESH_CONTOURS_CONNECTION_STYLE[mp_face_mesh_connections.FACEMESH_RIGHT_EYE])
-            mp_drawing.draw_landmarks(image, face_landmarks, mp_face_mesh_connections.FACEMESH_FACE_OVAL, landmark_drawing_spec=None, connection_drawing_spec=drawing_styles._FACEMESH_CONTOURS_CONNECTION_STYLE[mp_face_mesh_connections.FACEMESH_FACE_OVAL])
-            mp_drawing.draw_landmarks(image, face_landmarks, mp_face_mesh_connections.FACEMESH_LIPS, landmark_drawing_spec=None, connection_drawing_spec=drawing_styles._FACEMESH_CONTOURS_CONNECTION_STYLE[mp_face_mesh_connections.FACEMESH_LIPS])
-
-        self.image = self.detection_rect.crop_image(image)
-        self.good_detection = good_detection
+        return image
 
     def __repr__(self):
         return f"InputDevice(device_name={self.device_name!r}, capture={self.capture!r}, input_size={self.input_size!r}, fps={self.fps!r})"
 
     def __str__(self):
         return self.device_name
+
+    def is_open(self):
+        return self.capture.isOpened()
 
 
 class SmoothedValue:
@@ -216,15 +198,6 @@ class SmoothedValue:
         self.value = self.clip(self.value * self.smoothness + new_value * (1 - self.smoothness))
 
 
-def check_looking_at(input_device, iris_size_threshold=0.99):
-    if not input_device.good_detection:
-        return False
-    if input_device.iris_size_ratio > iris_size_threshold:
-        print(input_device, input_device.iris_size_ratio)
-    return input_device.iris_size_ratio > iris_size_threshold
-    return input_device.iris_delta < 0.02 #or input_device.iris_size_ratio > iris_size_threshold
-
-
 class InputDevices:
     def __init__(self, input_devices):
         self.input_devices = input_devices
@@ -240,7 +213,7 @@ class InputDevices:
         return min(input_device.get_max_zoom_factor(output_width, output_height) for input_device in self.input_devices)
 
     def captures_are_opened(self):
-        return all(input_device.capture.isOpened() for input_device in self.input_devices)
+        return all(input_device.is_open() for input_device in self.input_devices)
 
     def capture_images(self, end_condition):
         current_input = None
@@ -252,15 +225,7 @@ class InputDevices:
                 previous_input = current_input
             for input_device in self.input_devices:
                 input_device.capture_image()
-            if frames_on_input > 25 and (current_input is None or not check_looking_at(current_input)) and any(check_looking_at(input_device) for input_device in self.input_devices):
-                for input_device in self.input_devices:
-                    if check_looking_at(input_device):
-                        print(f"Looking at {input_device}")
-                        current_input = input_device
-                        frames_on_input = 1
-                        yield input_device.image
-                        break
-            elif current_input is not None and current_input.good_detection:
+            if current_input is not None and current_input.good_detection:
                 yield current_input.image
             elif any(input_device.good_detection for input_device in self.input_devices):
                 for input_device in self.input_devices:
@@ -275,8 +240,8 @@ class InputDevices:
                     print("Lost face")
                     current_input = None
                     for input_device in self.input_devices:
-                        input_device.capture.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-                        input_device.capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
+                        input_device.input_device.capture.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+                        input_device.input_device.capture.set(cv2.CAP_PROP_AUTOFOCUS, 1)
                 yield previous_input.image
             else:
                 print("Defaulting to first camera")
@@ -321,19 +286,17 @@ def main():
     parser.add_argument("--fps", type=int, default=30, help="Frames per second for input and output.")
     parser.add_argument("--max-resolution", type=int, nargs=2, default=(2560, 1440), help="Maximum resolution to capture video at.")
     parser.add_argument("--smoothness", type=float, default=0.95, help="Tracking smoothing factor.")
-    parser.add_argument("--zoom-smoothness", type=float, default=0.975, help="Tracking smoothing factor.")
+    parser.add_argument("--zoom-smoothness", type=float, default=0.95, help="Tracking smoothing factor.")
     parser.add_argument("--zoom-target", type=float, default=2.0, help="Target value for how far to zoom in.")
     parser.add_argument("--digital-zoom", action="store_true", help="Do not limit zoom to input video resolution.")
+    parser.add_argument("--track", nargs="+", default=["left_eye", "right_eye", "nose"], choices=[e.name.lower() for e in mp_pose.PoseLandmark], help="Pose landmarks to track.")
 
 
     args = parser.parse_args()
 
-    input_devices = InputDevices([InputDevice.create(input_device_name, args.max_resolution, args.output_size, args.fps, args.smoothness, args.zoom_smoothness, args.zoom_target, args.digital_zoom) for input_device_name in args.inputs])
+    input_devices = InputDevices([Detector.create(InputDevice.create(input_device_name, args.max_resolution, args.fps), args.track, args.output_size, args.smoothness, args.zoom_smoothness, args.zoom_target, args.digital_zoom) for input_device_name in args.inputs])
 
     output_width, output_height = args.output_size
-
-    min_zoom_factor = 1
-    max_zoom_factor = input_devices.get_max_zoom_factor(output_width, output_height)
 
     with pyvirtualcam.Camera(width=output_width, height=output_height, fps=args.fps, device=args.output) as camera:
         print(f"Using virtual camera: {camera.device}")
@@ -350,9 +313,6 @@ def main():
                 time.sleep(1)
 
             print("Detected readers, starting output.")
-
-            center_x, center_y = None, None
-            zoom_factor = min_zoom_factor
 
             with input_devices.use():
                 def _end_condition():

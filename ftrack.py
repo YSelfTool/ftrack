@@ -74,9 +74,9 @@ class Detector:
         self.detection_rect = detection_rect
 
     @staticmethod
-    def create(input_device, track_landmarks, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom):
+    def create(input_device, track_landmarks, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom, model_complexity=0):
         detection_rect = DetectionRectangle(input_device.input_size, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom)
-        detection = mp_pose.Pose(static_image_mode=False, model_complexity=1, enable_segmentation=False, min_detection_confidence=0.5)
+        detection = mp_pose.Pose(static_image_mode=False, model_complexity=model_complexity, enable_segmentation=False, min_detection_confidence=0.5)
         target_landmarks = [mp_pose.PoseLandmark[landmark.upper()] for landmark in track_landmarks]
         return Detector(input_device, detection, target_landmarks, detection_rect)
 
@@ -94,9 +94,9 @@ class Detector:
             ys = []
             for index in self.target_landmarks:
                 landmark = detection_results.pose_landmarks.landmark[index]
-                if landmark.visibility > 0.5:
-                    xs.append(landmark.x * self.input_device.input_size[0])
-                    ys.append(landmark.y * self.input_device.input_size[1])
+                #if landmark.visibility > 0.5:
+                xs.append(landmark.x * self.input_device.input_size[0])
+                ys.append(landmark.y * self.input_device.input_size[1])
 
             if len(xs) > 1:
                 xs = np.array(xs)
@@ -290,11 +290,12 @@ def main():
     parser.add_argument("--zoom-target", type=float, default=2.0, help="Target value for how far to zoom in.")
     parser.add_argument("--digital-zoom", action="store_true", help="Do not limit zoom to input video resolution.")
     parser.add_argument("--track", nargs="+", default=["left_eye", "right_eye", "nose"], choices=[e.name.lower() for e in mp_pose.PoseLandmark], help="Pose landmarks to track.")
+    parser.add_argument("--model-complexity", type=int, choices=range(3), help="ML Model complexity (0-2)")
 
 
     args = parser.parse_args()
 
-    input_devices = InputDevices([Detector.create(InputDevice.create(input_device_name, args.max_resolution, args.fps), args.track, args.output_size, args.smoothness, args.zoom_smoothness, args.zoom_target, args.digital_zoom) for input_device_name in args.inputs])
+    input_devices = InputDevices([Detector.create(InputDevice.create(input_device_name, args.max_resolution, args.fps), args.track, args.output_size, args.smoothness, args.zoom_smoothness, args.zoom_target, args.digital_zoom, model_complexity=args.model_complexity) for input_device_name in args.inputs])
 
     output_width, output_height = args.output_size
 

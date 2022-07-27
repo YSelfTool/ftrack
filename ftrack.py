@@ -67,18 +67,20 @@ class DetectionRectangle:
 
 
 class Detector:
-    def __init__(self, input_device, detection, target_landmarks, detection_rect):
+    def __init__(self, input_device, detection, target_landmarks, angle_landmarks, detection_rect):
         self.input_device = input_device
         self.detection = detection
         self.target_landmarks = target_landmarks
         self.detection_rect = detection_rect
+        self.angle_landmarks = angle_landmarks
 
     @staticmethod
-    def create(input_device, track_landmarks, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom, model_complexity=0):
+    def create(input_device, track_landmarks, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom, angle_landmarks, model_complexity=0):
         detection_rect = DetectionRectangle(input_device.input_size, output_size, smoothness_pos, smoothness_size, target_size_factor, digital_zoom)
         detection = mp_pose.Pose(static_image_mode=False, model_complexity=model_complexity, enable_segmentation=False, min_detection_confidence=0.5)
         target_landmarks = [mp_pose.PoseLandmark[landmark.upper()] for landmark in track_landmarks]
-        return Detector(input_device, detection, target_landmarks, detection_rect)
+        angle_landmarks = [(mp_pose.PoseLandmark[left.upper()], mp_pose.PoseLandmark[right.upper()]) for (left, right) in angle_landmarks] if angle_landmarks is not None else []
+        return Detector(input_device, detection, target_landmarks, angle_landmarks, detection_rect)
 
     @contextlib.contextmanager
     def use(self):
@@ -107,6 +109,20 @@ class Detector:
                 height = np.max(np.abs(ys - center_y))
                 self.detection_rect.update((center_x, center_y), (width, height))
                 self.good_detection = True
+
+            self.angle = None
+            if self.angle_landmarks:
+                angles = []
+                for left_index, right_index in self.angle_landmarks:
+                    left = detection_results.pose_landmarks.landmark[left_index]
+                    right = detection_results.pose_landmarks.landmark[right_index]
+                    if left.visibility > 0.5 and right.visibility > 0.5:
+                        delta_xy = ((right.x - left.x)**2 + (right.y - left.y)**2)**0.5
+                        delta_z = abs(right.z - left.z)
+                        angle = np.arctan2(delta_z, delta_xy)
+                        angles.append(angle * 180 / np.pi)
+                if angles:
+                    self.angle = np.mean(angles)
 
         self.image = self.detection_rect.crop_image(image)
 
@@ -199,8 +215,11 @@ class SmoothedValue:
 
 
 class InputDevices:
-    def __init__(self, input_devices):
+    def __init__(self, input_devices, min_frames_between_switch=30, small_angle_threshold=15, large_angle_threshold=45):
         self.input_devices = input_devices
+        self.min_frames_between_switch = min_frames_between_switch
+        self.small_angle_threshold = small_angle_threshold
+        self.large_angle_threshold = large_angle_threshold
 
     @contextlib.contextmanager
     def use(self):
@@ -225,7 +244,15 @@ class InputDevices:
                 previous_input = current_input
             for input_device in self.input_devices:
                 input_device.capture_image()
-            if current_input is not None and current_input.good_detection:
+            if (current_input is None or frames_on_input >= self.min_frames_between_switch) and (current_input is None or not current_input.good_detection or current_input.angle is None or current_input.angle > self.large_angle_threshold) and any(device.good_detection and device.angle is not None and device.angle < self.small_angle_threshold for device in self.input_devices):
+                for input_device in self.input_devices:
+                    if input_device.good_detection and input_device.angle is not None and input_device.angle < self.small_angle_threshold:
+                        print(f"Looking at {input_device}")
+                        current_input = input_device
+                        frames_on_input = 1
+                        yield current_input.image
+                        break
+            elif current_input is not None and current_input.good_detection:
                 yield current_input.image
             elif any(input_device.good_detection for input_device in self.input_devices):
                 for input_device in self.input_devices:
@@ -290,12 +317,16 @@ def main():
     parser.add_argument("--zoom-target", type=float, default=2.0, help="Target value for how far to zoom in.")
     parser.add_argument("--digital-zoom", action="store_true", help="Do not limit zoom to input video resolution.")
     parser.add_argument("--track", nargs="+", default=["left_eye", "right_eye", "nose"], choices=[e.name.lower() for e in mp_pose.PoseLandmark], help="Pose landmarks to track.")
-    parser.add_argument("--model-complexity", type=int, choices=range(3), help="ML Model complexity (0-2)")
+    parser.add_argument("--angle", nargs=2, dest="angle_landmarks", action="append", choices=[e.name.lower() for e in mp_pose.PoseLandmark], help="Pairs of left-right landmarks to calculate the angle relative to the camera from.")
+    parser.add_argument("--small-angle-threshold", type=float, default=15, help="Angle in degrees below which someone is looking at the camera.")
+    parser.add_argument("--large-angle-threshold", type=float, default=15, help="Angle in degrees above which someone is looking away from the camera.")
+    parser.add_argument("--min-frames-between-switch", type=int, help="Minimum number of frames between two subsequent camera switches (to avoid flickering). Defaults to fps.")
+    parser.add_argument("--model-complexity", default=0, type=int, choices=range(3), help="ML Model complexity (0 (faster) to 2 (better))")
 
 
     args = parser.parse_args()
 
-    input_devices = InputDevices([Detector.create(InputDevice.create(input_device_name, args.max_resolution, args.fps), args.track, args.output_size, args.smoothness, args.zoom_smoothness, args.zoom_target, args.digital_zoom, model_complexity=args.model_complexity) for input_device_name in args.inputs])
+    input_devices = InputDevices([Detector.create(InputDevice.create(input_device_name, args.max_resolution, args.fps), args.track, args.output_size, args.smoothness, args.zoom_smoothness, args.zoom_target, args.digital_zoom, angle_landmarks=args.angle_landmarks, model_complexity=args.model_complexity) for input_device_name in args.inputs], small_angle_threshold=args.small_angle_threshold, large_angle_threshold=args.large_angle_threshold, min_frames_between_switch=args.min_frames_between_switch or args.fps)
 
     output_width, output_height = args.output_size
 
